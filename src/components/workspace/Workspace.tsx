@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Link2, Plus, Trash2, Archive, Play, Pause, RotateCcw, StickyNote,
   CheckSquare, Timer, Volume2, VolumeX, X, ExternalLink, GripVertical,
+  Upload, FileText, Link, LayoutList, Clock,
 } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 // ------------------------------ Types & storage ------------------------------
 type Status = "TODO" | "DOING" | "DONE";
+type TabId = "tasks" | "links" | "focus" | "notes";
 interface Task { id: string; title: string; status: Status; createdAt: number; }
 interface LinkItem { id: string; url: string; title: string; domain: string; favicon: string; createdAt: number; }
 interface Note { id: string; text: string; updatedAt: number; }
@@ -28,21 +31,46 @@ const domainOf = (u: string) => { try { return new URL(u).hostname.replace(/^www
 
 // ------------------------------ Root ------------------------------
 export function Workspace() {
+  const [activeTab, setActiveTab] = useState<TabId>("tasks");
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Header />
       <main className="mx-auto max-w-[1400px] px-6 pb-24 pt-8 lg:px-10">
         <Hero />
-        <div className="mt-10 grid grid-cols-1 gap-6 lg:grid-cols-12">
-          <section className="lg:col-span-8 space-y-6">
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as TabId)} className="mt-10">
+          <TabsList className="grid w-full grid-cols-4 lg:w-auto lg:inline-grid">
+            <TabsTrigger value="tasks" className="gap-1.5">
+              <LayoutList className="h-4 w-4" />
+              <span className="hidden sm:inline">Tasks</span>
+            </TabsTrigger>
+            <TabsTrigger value="links" className="gap-1.5">
+              <Link className="h-4 w-4" />
+              <span className="hidden sm:inline">Links</span>
+            </TabsTrigger>
+            <TabsTrigger value="focus" className="gap-1.5">
+              <Clock className="h-4 w-4" />
+              <span className="hidden sm:inline">Focus</span>
+            </TabsTrigger>
+            <TabsTrigger value="notes" className="gap-1.5">
+              <FileText className="h-4 w-4" />
+              <span className="hidden sm:inline">Notes</span>
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="tasks" className="mt-6">
             <Kanban />
+          </TabsContent>
+          <TabsContent value="links" className="mt-6">
             <Links />
-          </section>
-          <aside className="lg:col-span-4 space-y-6">
+          </TabsContent>
+          <TabsContent value="focus" className="mt-6">
             <Focus />
+          </TabsContent>
+          <TabsContent value="notes" className="mt-6">
             <Notes />
-          </aside>
-        </div>
+          </TabsContent>
+        </Tabs>
       </main>
       <footer className="border-t border-border">
         <div className="mx-auto max-w-[1400px] px-6 py-6 text-sm text-muted-foreground lg:px-10">
@@ -67,12 +95,6 @@ function Header() {
             <div className="text-xs text-muted-foreground">Minimalist workspace</div>
           </div>
         </div>
-        <nav className="hidden items-center gap-6 text-sm text-muted-foreground md:flex">
-          <a href="#tasks" className="hover:text-foreground">Tasks</a>
-          <a href="#links" className="hover:text-foreground">Links</a>
-          <a href="#focus" className="hover:text-foreground">Focus</a>
-          <a href="#notes" className="hover:text-foreground">Notes</a>
-        </nav>
         <div className="text-sm tabular-nums text-muted-foreground" suppressHydrationWarning>
           {time ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
         </div>
@@ -171,7 +193,7 @@ function Kanban() {
 function Links() {
   const [links, setLinks] = useLocal<LinkItem[]>("wk.links", []);
   const [url, setUrl] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   const add = () => {
     const u = url.trim();
@@ -183,54 +205,144 @@ function Links() {
   };
   const remove = (id: string) => setLinks(l => l.filter(x => x.id !== id));
 
-  const shown = links; // MVP: one list
+  const addUrl = useCallback((urlText: string) => {
+    const u = urlText.trim();
+    if (!u) return;
+    const withProto = /^https?:\/\//i.test(u) ? u : `https://${u}`;
+    const d = domainOf(withProto);
+    setLinks(l => [{ id: uid(), url: withProto, title: d || withProto, domain: d, favicon: d ? `https://www.google.com/s2/favicons?domain=${d}&sz=64` : "", createdAt: Date.now() }, ...l]);
+  }, [setLinks]);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+
+    // Check for dragged URL text
+    const text = e.dataTransfer.getData("text/plain");
+    if (text && /^https?:\/\//i.test(text)) {
+      addUrl(text);
+      return;
+    }
+
+    // Check for files
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      Array.from(files).forEach(file => {
+        // For text files, read content as URLs
+        if (file.type === "text/plain" || file.name.endsWith(".txt")) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const content = event.target?.result as string;
+            const urls = content.split(/[\s\n]+/).filter(u => /^https?:\/\//i.test(u));
+            urls.forEach(url => addUrl(url));
+          };
+          reader.readAsText(file);
+        } else if (file.type.startsWith("image/")) {
+          // For images, create a local object URL
+          const localUrl = URL.createObjectURL(file);
+          setLinks(l => [{
+            id: uid(),
+            url: localUrl,
+            title: file.name,
+            domain: "Local file",
+            favicon: "",
+            createdAt: Date.now()
+          }, ...l]);
+        } else {
+          // For other files, create a reference entry
+          setLinks(l => [{
+            id: uid(),
+            url: `file:${file.name}`,
+            title: file.name,
+            domain: "Local file",
+            favicon: "",
+            createdAt: Date.now()
+          }, ...l]);
+        }
+      });
+    }
+  }, [addUrl, setLinks]);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.currentTarget === e.target) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const shown = links;
   return (
     <section id="links" className="rounded-xl border border-border bg-card">
-      <SectionHead icon={<Link2 className="h-4 w-4" />} title="Links" hint={`${links.length} saved`}
-        right={
-          <button onClick={() => setShowArchived(v => !v)} className="text-xs text-muted-foreground hover:text-foreground">
-            {showArchived ? "Hide archived" : ""}
-          </button>
-        }
-      />
+      <SectionHead icon={<Link2 className="h-4 w-4" />} title="Links" hint={`${links.length} saved`} />
       <div className="flex gap-2 border-b border-border px-4 py-3">
         <input
           value={url}
           onChange={e => setUrl(e.target.value)}
           onKeyDown={e => e.key === "Enter" && add()}
-          placeholder="Paste a URL to save…"
+          placeholder="Paste a URL or drag files here…"
           className="flex-1 rounded-md border border-border bg-card px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-ring/40"
         />
         <button onClick={add} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground hover:opacity-90">
           <Plus className="h-4 w-4" /> Save
         </button>
       </div>
-      {shown.length === 0 ? (
-        <Empty label="No links saved yet. Paste one above to begin." />
-      ) : (
-        <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
-          {shown.map(l => (
-            <a key={l.id} href={l.url} target="_blank" rel="noreferrer"
-              className="group relative flex flex-col gap-3 rounded-lg border border-border bg-card p-4 transition hover:border-foreground/20 hover:shadow-sm">
-              <div className="flex items-center gap-2">
-                {l.favicon
-                  ? <img src={l.favicon} alt="" className="h-5 w-5 rounded-sm" />
-                  : <div className="h-5 w-5 rounded-sm bg-secondary" />}
-                <span className="truncate text-xs text-muted-foreground">{l.domain}</span>
-                <ExternalLink className="ml-auto h-3.5 w-3.5 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
-              </div>
-              <div className="line-clamp-2 text-sm font-medium text-foreground">{l.title}</div>
-              <button
-                onClick={e => { e.preventDefault(); remove(l.id); }}
-                className="absolute right-2 top-2 rounded-md p-1 text-muted-foreground opacity-0 transition hover:bg-secondary group-hover:opacity-100"
-                aria-label="Remove"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </a>
-          ))}
-        </div>
-      )}
+
+      {/* Drop zone */}
+      <div
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        className={`relative min-h-[200px] transition-colors ${isDragging ? "bg-primary/5" : ""}`}
+      >
+        {isDragging && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/50 bg-primary/5">
+            <div className="text-center">
+              <Upload className="mx-auto h-10 w-10 text-primary/60" />
+              <p className="mt-2 text-sm font-medium text-primary">Drop URLs or files here</p>
+              <p className="text-xs text-muted-foreground">URLs, text files with links, images</p>
+            </div>
+          </div>
+        )}
+
+        {shown.length === 0 ? (
+          !isDragging && <Empty label="No links saved yet. Paste a URL above or drag files here." />
+        ) : (
+          <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-3">
+            {shown.map(l => (
+              <a key={l.id} href={l.url} target="_blank" rel="noreferrer"
+                className="group relative flex flex-col gap-3 rounded-lg border border-border bg-card p-4 transition hover:border-foreground/20 hover:shadow-sm">
+                <div className="flex items-center gap-2">
+                  {l.favicon
+                    ? <img src={l.favicon} alt="" className="h-5 w-5 rounded-sm" />
+                    : <div className="h-5 w-5 grid place-items-center rounded-sm bg-secondary text-muted-foreground">
+                        {l.domain === "Local file" ? <FileText className="h-3 w-3" /> : l.domain[0]?.toUpperCase() || "?"}
+                      </div>}
+                  <span className="truncate text-xs text-muted-foreground">{l.domain}</span>
+                  <ExternalLink className="ml-auto h-3.5 w-3.5 text-muted-foreground opacity-0 transition group-hover:opacity-100" />
+                </div>
+                <div className="line-clamp-2 text-sm font-medium text-foreground">{l.title}</div>
+                <button
+                  onClick={e => { e.preventDefault(); remove(l.id); }}
+                  className="absolute right-2 top-2 rounded-md p-1 text-muted-foreground opacity-0 transition hover:bg-secondary group-hover:opacity-100"
+                  aria-label="Remove"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </a>
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
